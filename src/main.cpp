@@ -14,8 +14,15 @@
 // =================================================================
 const char *ssid = WIFI_SSID;
 const char *password = WIFI_PASSWORD;
-const char *apiUrl = "https://arduino-train-api.bitrey.it/departures/"
-                     "S05037?limit=5&key=" API_KEY;
+
+// Default to Castelfranco Emilia if TRAIN_STATION_CODE is not defined
+#ifndef TRAIN_STATION_CODE
+#define TRAIN_STATION_CODE "S05037"
+#endif
+
+const char *apiUrl =
+    "https://arduino-train-api.bitrey.it/departures/" TRAIN_STATION_CODE
+    "?limit=5&key=" API_KEY;
 
 // =================================================================
 // DISPLAY CONFIGURATION
@@ -210,7 +217,7 @@ void loop() {
       char timeBuffer[9];
       sprintf(timeBuffer, "%02d:%02d:%02d", currentHour, currentMinute,
               currentSecond);
-      dmd.drawString(11, currentYOffset, timeBuffer, strlen(timeBuffer),
+      dmd.drawString(10, currentYOffset, timeBuffer, strlen(timeBuffer),
                      GRAPHICS_NORMAL);
       lastDisplayedSecond = currentSecond;
     }
