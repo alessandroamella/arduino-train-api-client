@@ -68,6 +68,7 @@ bool colonVisible = true;
 // Data Storage
 // =================================================================
 String weatherString = "Loading...";
+String stationName = ""; // Station name from API
 
 // =================================================================
 // Train data structure
@@ -89,7 +90,8 @@ enum DisplayState {
   STATE_SHOW_DEPARTURES_HEADER,
   STATE_SHOW_DEPARTURES
 };
-DisplayState currentState = STATE_SHOW_TIME;
+// DisplayState currentState = STATE_SHOW_TIME;
+DisplayState currentState = STATE_SHOW_DEPARTURES_HEADER; // debug
 unsigned long stateChangeTimestamp = 0;
 int currentTrainIndex = 0;
 
@@ -112,7 +114,8 @@ void IRAM_ATTR triggerScan() { dmd.scanDisplayBySPI(); }
 // =================================================================
 void setFont(FontType font);
 void fetchData();
-void displayScrollingText(const String &text);
+void displayScrollingText(const String &text, int left = (32 * DISPLAYS_ACROSS),
+                          int top = -1);
 void animateSlideUp(const String &outgoingText, const String &incomingText);
 void animateTrainSlideUp(const TrainInfo *outgoingTrain,
                          const TrainInfo *incomingTrain);
@@ -124,25 +127,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\nStarting Train Departure Board...");
 
-  // Configure the hardware timer for DMD refresh
-  // The ESP32 has 4 hardware timers. timerBegin takes the timer frequency in
-  // Hz. Let's aim for a high refresh rate. A frequency of 40000 Hz gives a 25us
-  // period.
-  dmd_timer =
-      timerBegin(40000); // Returns a pointer to the timer object on success
-
-  if (dmd_timer) {
-    // Attach the ISR function to the timer
-    timerAttachInterrupt(dmd_timer, &triggerScan);
-  }
-
-  // Initialize DMD and select font
-  dmd.clearScreen(true);
-  setFont(FONT_ARIAL_14);
-
-  Serial.println("DMD Initialized.");
-
-  // Connect to Wi-Fi
+  // Connect to Wi-Fi FIRST
   Serial.println("Wi-Fiying...");
   WiFi.begin(ssid, password);
   Serial.print("Connecting to WiFi");
@@ -151,24 +136,31 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nConnected!");
-  dmd.clearScreen(true);
-  delay(1000);
 
-  // Fetch initial data from the API
+  // Configure the timer (but don't start it yet)
+  dmd_timer = timerBegin(40000); // 40kHz timer frequency
+
+  if (dmd_timer) {
+    // Attach the ISR function to the timer
+    timerAttachInterrupt(dmd_timer, &triggerScan);
+    Serial.println("DMD refresh timer configured");
+  }
+
+  // Initialize the display BEFORE starting the timer
+  dmd.clearScreen(true);
+  delay(100);
+
+  // Fetch initial data BEFORE starting the timer
   fetchData();
+
+  // Start the timer at the END of setup (as per demo)
+  if (dmd_timer) {
+    timerAlarm(dmd_timer, 12, true, 0);
+    Serial.println("DMD refresh timer started");
+  }
 
   // Set the starting timestamp for the first state
   stateChangeTimestamp = millis();
-
-  // Start the DMD refresh timer
-  if (dmd_timer) {
-    // Set the alarm period. The value is in timer ticks.
-    // With a 40000 Hz frequency, 12 ticks gives an alarm every 12/40000 s = 300
-    // us. The third boolean parameter 'true' makes it autoreload, and 0 means
-    // unlimited reloads (periodic alarm).
-    timerAlarm(dmd_timer, 12, true, 0);
-    Serial.println("DMD refresh timer started.");
-  }
 }
 
 // =================================================================
@@ -208,12 +200,15 @@ void loop() {
     if (stateChangeTimestamp != 0) { // Entra solo la prima volta
       enterTime = millis();
       stateChangeTimestamp = 0; // Resetta il flag
+      dmd.clearScreen(true);    // Clear on state entry
     }
 
     // Aggiorna l'ora ogni secondo mentre siamo in questo stato
     static int lastDisplayedSecond = -1;
     if (currentSecond != lastDisplayedSecond) {
       dmd.clearScreen(true);
+      setFont(FONT_ARIAL_14); // Use setFont for consistency
+      // Mostra l'ora con il formato HH:MM:SS
       char timeBuffer[9];
       sprintf(timeBuffer, "%02d:%02d:%02d", currentHour, currentMinute,
               currentSecond);
@@ -232,6 +227,7 @@ void loop() {
   case STATE_SHOW_WEATHER: {
     // Per il meteo, lo scroll va ancora bene perché può essere lungo
     setFont(FONT_ARIAL_14); // Ensure normal font for weather
+    dmd.clearScreen(true);
     displayScrollingText(weatherString);
     currentState = STATE_SHOW_DEPARTURES_HEADER;
     stateChangeTimestamp = millis();
@@ -240,17 +236,16 @@ void loop() {
 
   case STATE_SHOW_DEPARTURES_HEADER: {
     dmd.clearScreen(true);
+    delay(50); // Brief pause to ensure clear completes
     setFont(FONT_SYSTEM_5X7);
 
     // Disegna l'icona del treno
-    dmd.drawBitmap(8, 0, trainIconBitmap, 16, 16, GRAPHICS_NORMAL);
+    dmd.drawBitmap(0, 0, trainIconBitmap, 16, 16, GRAPHICS_NORMAL);
 
-    String header = "Treni";
-    String footer = "da CF";
-    dmd.drawString(32, 0, header.c_str(), header.length(), GRAPHICS_NORMAL);
-    dmd.drawString(32, 8, footer.c_str(), footer.length(), GRAPHICS_NORMAL);
+    // Scroll the station name on the second line
+    String text = "Treni da " + (stationName.length() > 0 ? stationName : "CF");
+    displayScrollingText(text);
 
-    delay(INFO_HOLD_DURATION);
     currentState = STATE_SHOW_DEPARTURES;
     stateChangeTimestamp = millis();
     break;
@@ -259,7 +254,8 @@ void loop() {
   case STATE_SHOW_DEPARTURES: {
     if (departures.empty()) {
       dmd.clearScreen(true);
-      dmd.drawString(2, 0, "Nessun treno", 12, GRAPHICS_NORMAL);
+      dmd.drawString(2, 0, "Nessun", 6, GRAPHICS_NORMAL);
+      dmd.drawString(2, 8, "treno :(", 8, GRAPHICS_NORMAL);
       delay(INFO_HOLD_DURATION);
       currentState = STATE_SHOW_TIME;
       // Usa un valore non-zero per triggerare il redraw dell'ora
@@ -346,8 +342,10 @@ void setFont(FontType font) {
  */
 void fetchData() {
   Serial.println("Fetching new data...");
-  dmd.clearScreen(true);
-  dmd.drawString(2, TEXT_Y_POS, "Updating", 8, GRAPHICS_NORMAL);
+
+  // Don't try to display "Updating" - it might be crashing here
+  // dmd.clearScreen(true);
+  // dmd.drawString(2, TEXT_Y_POS, "Updating", 8, GRAPHICS_NORMAL);
 
   HTTPClient http;
   http.begin(apiUrl);
@@ -395,6 +393,14 @@ void fetchData() {
                                  // supports it (SystemFont5x7 does)
       weatherString = temp + " - " + desc;
 
+      // Parse station name
+      const char *stationNameStr = doc["stationName"];
+      if (stationNameStr) {
+        stationName = String(stationNameStr);
+        Serial.print("Station name: ");
+        Serial.println(stationName);
+      }
+
       // Parse departures
       JsonArray departuresArray = doc["departures"];
       for (JsonObject train : departuresArray) {
@@ -406,7 +412,7 @@ void fetchData() {
         departures.push_back(newTrain);
       }
 
-      Serial.println("Data parsed successfully.");
+      Serial.println("Data parsed successfully");
 
     } else {
       Serial.printf("[HTTP] GET... failed, error: %s\n",
@@ -428,12 +434,19 @@ void fetchData() {
  * This is a blocking function and will run until the text has scrolled off
  * screen.
  * @param text The text to display.
+ * @param left The left position where marquee starts (default: screen width).
+ * @param top The top position where marquee is displayed (default:
+ * currentYOffset).
  */
-void displayScrollingText(const String &text) {
+void displayScrollingText(const String &text, int left, int top) {
+  // Use currentYOffset if top is not specified
+  int yPos = (top == -1) ? currentYOffset : top;
+
+  // Clear before starting marquee
   dmd.clearScreen(true);
-  // Use currentYOffset based on the selected font
-  dmd.drawMarquee(text.c_str(), text.length(), (32 * DISPLAYS_ACROSS),
-                  currentYOffset);
+  delay(10); // Brief pause
+
+  dmd.drawMarquee(text.c_str(), text.length(), left, yPos);
 
   long start = millis();
   long timer = start;
@@ -445,6 +458,9 @@ void displayScrollingText(const String &text) {
       timer = millis();
     }
   }
+
+  // Clear after marquee completes
+  dmd.clearScreen(true);
 }
 
 /**
