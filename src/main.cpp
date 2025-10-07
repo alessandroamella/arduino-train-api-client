@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <time.h>
 
 // Include your custom DMD library and a font
 #include "fonts/Arial14.h"
@@ -56,14 +57,15 @@ hw_timer_t *dmd_timer = NULL;
 unsigned long lastDataFetch = 0;
 const long fetchInterval = 5 * 60 * 1000; // 5 minutes in milliseconds
 
+// Timezone configuration for Italy (CET/CEST with automatic DST)
+const char *TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3"; // Europe/Rome timezone
+
 // =================================================================
-// Local clock variables, synced from the server
+// Local clock variables, synced from NTP with timezone
 // =================================================================
 int currentHour = 0;
 int currentMinute = 0;
 int currentSecond = 0;
-unsigned long lastSecondTick = 0;
-bool colonVisible = true;
 
 // =================================================================
 // Data Storage
@@ -212,6 +214,35 @@ void setup() {
   dmd.clearScreen(true);
   delay(100);
 
+  // =================================================================
+  // TIMEZONE & NTP SETUP
+  // =================================================================
+  // Configure the ESP32's internal NTP client.
+  configTime(0, 0, "pool.ntp.org");
+
+  // Set the timezone environment variable.
+  setenv("TZ", TZ_INFO, 1);
+  tzset();
+  Serial.println(
+      "Timezone configured for Europe/Rome (CET/CEST with automatic DST)");
+
+  // Wait for the time to be synchronized.
+  struct tm timeinfo;
+  Serial.print("Waiting for NTP time sync");
+  while (!getLocalTime(&timeinfo)) {
+    Serial.print(".");
+    delay(1000);
+  }
+  Serial.println("\nTime synchronized!");
+
+  // Now that we have the time, get the initial values.
+  getLocalTime(&timeinfo); // Call it again to populate the struct
+  currentHour = timeinfo.tm_hour;
+  currentMinute = timeinfo.tm_min;
+  currentSecond = timeinfo.tm_sec;
+  Serial.printf("Initial time: %02d:%02d:%02d\n", currentHour, currentMinute,
+                currentSecond);
+
   // Fetch initial data BEFORE starting the timer
   fetchData();
 
@@ -248,21 +279,12 @@ void loop() {
     fetchData();
   }
 
-  // Update local clock every second
-  if (millis() - lastSecondTick >= 1000) {
-    lastSecondTick = millis();
-    currentSecond++;
-    if (currentSecond >= 60) {
-      currentSecond = 0;
-      currentMinute++;
-      if (currentMinute >= 60) {
-        currentMinute = 0;
-        currentHour++;
-        if (currentHour >= 24) {
-          currentHour = 0;
-        }
-      }
-    }
+  // Get local time with timezone applied
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    currentHour = timeinfo.tm_hour;
+    currentMinute = timeinfo.tm_min;
+    currentSecond = timeinfo.tm_sec;
   }
 
   // Run the display state machine
@@ -477,21 +499,6 @@ void fetchData() {
         Serial.println(error.c_str());
         weatherString = "JSON Error";
         return;
-      }
-
-      // Sync local time
-      const char *timeStr = doc["time"]; // "19:10" or "19:10:30"
-      if (timeStr) {
-        // Try to parse with seconds first, if it fails parse without seconds
-        int parsed = sscanf(timeStr, "%d:%d:%d", &currentHour, &currentMinute,
-                            &currentSecond);
-        if (parsed < 3) {
-          // No seconds in the time string, set to 0
-          sscanf(timeStr, "%d:%d", &currentHour, &currentMinute);
-          currentSecond = 0;
-        }
-        Serial.printf("Time synced: %02d:%02d:%02d\n", currentHour,
-                      currentMinute, currentSecond);
       }
 
       // Parse weather
