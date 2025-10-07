@@ -90,8 +90,8 @@ enum DisplayState {
   STATE_SHOW_DEPARTURES_HEADER,
   STATE_SHOW_DEPARTURES
 };
-// DisplayState currentState = STATE_SHOW_TIME;
-DisplayState currentState = STATE_SHOW_DEPARTURES_HEADER; // debug
+DisplayState currentState = STATE_SHOW_TIME;
+// DisplayState currentState = STATE_SHOW_DEPARTURES_HEADER; // debug
 unsigned long stateChangeTimestamp = 0;
 int currentTrainIndex = 0;
 
@@ -130,6 +130,13 @@ void setup() {
   // Connect to Wi-Fi FIRST
   Serial.println("Wi-Fiying...");
   WiFi.begin(ssid, password);
+
+  WiFi.setHostname("ESP32-Train-Board"); // Optional but good practice
+
+  // Add DNS servers (Google's public DNS)
+  IPAddress dns1(8, 8, 8, 8);
+  IPAddress dns2(8, 8, 4, 4);
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, dns1, dns2);
   Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
@@ -349,6 +356,8 @@ void fetchData() {
 
   HTTPClient http;
   http.begin(apiUrl);
+  Serial.print("Requesting URL: ");
+  Serial.println(apiUrl);
   int httpCode = http.GET();
 
   if (httpCode > 0) {
