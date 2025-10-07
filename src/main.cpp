@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 
 // Include your custom DMD library and a font
 #include "fonts/Arial14.h"
@@ -110,6 +111,67 @@ const unsigned char trainIconBitmap[] PROGMEM = {
 void IRAM_ATTR triggerScan() { dmd.scanDisplayBySPI(); }
 
 // =================================================================
+// Constanti
+// =================================================================
+const unsigned long TIME_DISPLAY_DURATION = 10000; // 10 secondi
+const unsigned long INFO_HOLD_DURATION = 2500;     // 2.5 secondi
+
+// =================================================================
+// WIFI CONNECTION - ROBUST VERSION
+// =================================================================
+bool connectToWiFiRobust(int maxRetries = 3) {
+  for (int retry = 0; retry < maxRetries; retry++) {
+    Serial.printf("\n=== WiFi Connection Attempt %d/%d ===\n", retry + 1,
+                  maxRetries);
+
+    // FULL reset del WiFi stack
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(1000);
+
+    // Riaccendi WiFi
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname("ESP32-Train-Board"); // Imposta hostname
+
+    // Power management aggressivo per stabilità
+    esp_wifi_set_ps(WIFI_PS_NONE); // Disabilita power saving
+
+    WiFi.begin(ssid, password);
+
+    // Attendi connessione
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nConnected!");
+      Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
+      Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
+
+      // Forza DNS multipli
+      IPAddress dns1(8, 8, 8, 8);
+      IPAddress dns2(1, 1, 1, 1);
+      WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, dns1, dns2);
+
+      delay(2000); // Dai tempo al DNS di inizializzare
+
+      Serial.printf("DNS1: %s\n", WiFi.dnsIP(0).toString().c_str());
+      Serial.printf("DNS2: %s\n", WiFi.dnsIP(1).toString().c_str());
+
+      return true;
+    }
+
+    Serial.println("\n✗ Failed, retrying...");
+    delay(2000);
+  }
+
+  return false;
+}
+
+// =================================================================
 // FORWARD DECLARATIONS
 // =================================================================
 void setFont(FontType font);
@@ -125,24 +187,17 @@ void animateTrainSlideUp(const TrainInfo *outgoingTrain,
 // =================================================================
 void setup() {
   Serial.begin(115200);
-  Serial.println("\nStarting Train Departure Board...");
+  delay(1000);
 
-  // Connect to Wi-Fi FIRST
-  Serial.println("Wi-Fiying...");
-  WiFi.begin(ssid, password);
+  Serial.println("\n\n=== Train Board Starting ===");
 
-  WiFi.setHostname("ESP32-Train-Board"); // Optional but good practice
-
-  // Add DNS servers (Google's public DNS)
-  IPAddress dns1(8, 8, 8, 8);
-  IPAddress dns2(8, 8, 4, 4);
-  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, dns1, dns2);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  // Connessione robusta
+  if (!connectToWiFiRobust(3)) {
+    Serial.println("\n!!! FATAL: Cannot connect to WiFi !!!");
+    Serial.println("Restarting in 10 seconds...");
+    delay(10000);
+    ESP.restart();
   }
-  Serial.println("\nConnected!");
 
   // Configure the timer (but don't start it yet)
   dmd_timer = timerBegin(40000); // 40kHz timer frequency
@@ -174,6 +229,20 @@ void setup() {
 // MAIN LOOP
 // =================================================================
 void loop() {
+  // Check WiFi health ogni tanto
+  static unsigned long lastWiFiCheck = 0;
+  if (millis() - lastWiFiCheck > 30000) { // Ogni 30 secondi
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("!!! WiFi disconnected in loop !!!");
+      if (!connectToWiFiRobust(2)) {
+        Serial.println("Cannot recover, restarting...");
+        delay(5000);
+        ESP.restart();
+      }
+    }
+    lastWiFiCheck = millis(); // Aggiorna DOPO il check
+  }
+
   // Check if it's time to fetch new data
   if (millis() - lastDataFetch >= fetchInterval) {
     fetchData();
@@ -197,36 +266,54 @@ void loop() {
   }
 
   // Run the display state machine
-  // Definiamo costanti per la leggibilità
-  const unsigned long TIME_DISPLAY_DURATION = 10000; // 10 secondi
-  const unsigned long INFO_HOLD_DURATION = 2500;     // 2.5 secondi
 
   switch (currentState) {
   case STATE_SHOW_TIME: {
+    // Variabili statiche che mantengono lo stato tra le chiamate al loop
     static unsigned long enterTime = 0;
-    if (stateChangeTimestamp != 0) { // Entra solo la prima volta
-      enterTime = millis();
-      stateChangeTimestamp = 0; // Resetta il flag
-      dmd.clearScreen(true);    // Clear on state entry
+    static bool firstEntry = true;
+    static int lastDisplayedSecond = -1;
+
+    // Entrata nello stato (una volta sola)
+    if (stateChangeTimestamp != 0) {
+      enterTime = millis();     // Salva quando siamo entrati
+      stateChangeTimestamp = 0; // Reset del flag
+      firstEntry = true;        // Marca come prima entry
+      lastDisplayedSecond = -1; // Forza ridisegno immediato
+      dmd.clearScreen(true);    // Pulisci schermo
+      setFont(FONT_ARIAL_14);   // Imposta font grande
+      Serial.println("Entered STATE_SHOW_TIME");
     }
 
-    // Aggiorna l'ora ogni secondo mentre siamo in questo stato
-    static int lastDisplayedSecond = -1;
+    // Aggiornamento dell'ora (ogni secondo)
+    // Ridisegna solo se il secondo è cambiato
     if (currentSecond != lastDisplayedSecond) {
       dmd.clearScreen(true);
-      setFont(FONT_ARIAL_14); // Use setFont for consistency
-      // Mostra l'ora con il formato HH:MM:SS
+
+      // Crea la stringa dell'ora formato HH:MM:SS
       char timeBuffer[9];
       sprintf(timeBuffer, "%02d:%02d:%02d", currentHour, currentMinute,
               currentSecond);
+
+      // Disegna l'ora al centro (circa)
       dmd.drawString(10, currentYOffset, timeBuffer, strlen(timeBuffer),
                      GRAPHICS_NORMAL);
-      lastDisplayedSecond = currentSecond;
+
+      lastDisplayedSecond =
+          currentSecond; // Ricorda quale secondo abbiamo mostrato
+
+      if (firstEntry) {
+        Serial.printf("Displaying time: %s\n", timeBuffer);
+        firstEntry = false;
+      }
     }
 
+    // Uscita dallo stato (dopo 10 secondi)
     if (millis() - enterTime > TIME_DISPLAY_DURATION) {
+      Serial.println("Time display duration elapsed, moving to weather");
       currentState = STATE_SHOW_WEATHER;
-      stateChangeTimestamp = millis();
+      stateChangeTimestamp = millis(); // Segnala cambio stato
+      lastDisplayedSecond = -1;        // Reset per la prossima volta
     }
     break;
   }
@@ -350,12 +437,23 @@ void setFont(FontType font) {
 void fetchData() {
   Serial.println("Fetching new data...");
 
-  // Don't try to display "Updating" - it might be crashing here
-  // dmd.clearScreen(true);
-  // dmd.drawString(2, TEXT_Y_POS, "Updating", 8, GRAPHICS_NORMAL);
+  // Check WiFi PRIMA di tentare HTTP
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, skipping fetch");
+    weatherString = "WiFi Down";
+    return;
+  }
 
   HTTPClient http;
-  http.begin(apiUrl);
+  http.setTimeout(15000); // Timeout esplicito
+
+  if (!http.begin(apiUrl)) { // Check se begin() fallisce
+    Serial.println("http.begin() failed (DNS?)");
+    weatherString = "DNS Error";
+    http.end();
+    return;
+  }
+
   Serial.print("Requesting URL: ");
   Serial.println(apiUrl);
   int httpCode = http.GET();
@@ -368,6 +466,7 @@ void fetchData() {
 
       // Clear old train data
       departures.clear();
+      departures.shrink_to_fit(); // Libera davvero la memoria
 
       // Parse JSON
       JsonDocument doc; // Allocate memory for the JSON object
